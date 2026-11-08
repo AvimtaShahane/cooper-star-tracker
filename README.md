@@ -84,6 +84,21 @@ nothing. We diagnosed why rather than dropping it:
 Learning won where supervision is dense and the pattern is local. Classical
 geometry won the global association problem.
 
+## The interface
+
+`app.py` is a ground-station console with four views — **Observe** (single-frame
+acquisition with live failure injection), **Sequence** (the Kalman filter
+coasting through sensor loss), **Analysis** (the degradation sweep), and
+**Method**.
+
+Colour carries state rather than decorating: **lime** means locked, **amber**
+means solved but degraded, **red** means no solution. Drag the degradation
+slider and the whole readout changes colour with the system — you can read
+what is happening without reading a number.
+
+Nothing in it is cached or pre-computed. Every frame is rendered and solved
+live, in milliseconds, when you load the page.
+
 ## Running it
 
 ```bash
