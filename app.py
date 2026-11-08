@@ -260,7 +260,7 @@ with t_obs:
 
         accent = (60, 245, 195) if solved else (229, 72, 77)
         st.image(frame_with_grid(img, res.get("centroids"), pred_uv, accent),
-                 use_container_width=True)
+                 width="stretch")
         st.markdown('<div class="caption">Boxes mark detected centroids. Ticks '
                     'mark catalog stars reprojected under the solved attitude. '
                     'They align only if the solution is correct.</div>',
@@ -416,10 +416,10 @@ with t_ana:
         with st.spinner("sweeping"):
             bm.run(trials=trials, model_path=None, out_json="/tmp/b.json",
                    out_png="/tmp/b.png")
-        c2.image("/tmp/b.png", use_container_width=True)
+        c2.image("/tmp/b.png", width="stretch")
     else:
         try:
-            c2.image("benchmark.png", use_container_width=True)
+            c2.image("benchmark.png", width="stretch")
         except Exception:
             c2.markdown('<div class="caption">Run the sweep to generate the '
                         'plot.</div>', unsafe_allow_html=True)
