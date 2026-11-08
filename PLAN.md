@@ -1,4 +1,4 @@
-# Technical reference
+# Technical Reference
 
 The vocabulary this project uses, and where each piece lives in the code.
 
