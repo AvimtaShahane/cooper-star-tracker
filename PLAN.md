@@ -1,145 +1,169 @@
-# Star Tracker — Build Plan (software only)
+# Technical reference
 
-**What it is:** the sensor a spacecraft uses to determine its orientation. It photographs the sky, identifies the stars, and solves for attitude to arcsecond precision. Every satellite carries one.
-
-**Why it wins the AI/ML track:** there is no training data for this and none can be collected, so the dataset generator *is* the project. That is a real methodology story, not an LLM wrapper.
+The vocabulary this project uses, and where each piece lives in the code.
 
 ---
 
-## Status: the critical path is already built and tested
+## Core concepts
 
-| File | What it does | Verified |
-|---|---|---|
-| `render.py` | Star catalog, camera model, PSF, sensor noise | 9,074 stars, 87 per frame, **151 img/s** |
-| `classical.py` | Centroids → triangle match → Wahba/SVD | **0.0091° (33 arcsec)**, 100% solve rate |
-| `model.py` | Geodesic loss, ResNet attitude net, U-Net detector | 11.3M + 118K params, gradients finite |
-| `train.py` | On-the-fly dataset, training loops | Smoke test: **131° → 0.006°** |
-| `tracking.py` | Multiplicative EKF | Coasts 1 s of total sensor loss at 0.19° |
-| `benchmark.py` | Noise sweep, bootstrap CIs, 3-panel plot | Full sweep runs |
-| `app.py` | Streamlit demo, judge-controlled sliders | Starts clean |
+**Attitude** — orientation. Not position. Position says where a satellite is;
+attitude says how it is rotated. Three degrees of freedom: pitch, yaw, roll.
 
-**Everything above runs right now with zero training.** You already have a demoable project. What remains is training the network and polishing.
+**Lost-in-space** — determining attitude with no prior estimate at all. The
+hard case, and what `classical.py` solves. The easy case is *tracking mode*,
+where you already have a rough answer from the previous frame.
 
----
+**Boresight** — the direction the camera is looking. The +Z axis of the camera
+frame.
 
-## Setup (10 minutes)
+**Arcsecond** — 1/3600 of a degree. The unit attitude error is reported in,
+because degrees are too coarse to be meaningful here. Our 0.0091° is 33
+arcseconds. Flight star trackers are 1–10.
 
-```bash
-pip install numpy scipy opencv-python matplotlib torch torchvision streamlit
-cd cosmos
-python render.py        # catalog stats, render speed
-python classical.py     # baseline accuracy sweep
-python tracking.py      # EKF coasting demo
-streamlit run app.py    # the demo
-```
+**Right ascension / declination** — longitude and latitude on the celestial
+sphere. How the star catalog stores positions.
 
-No API keys, no downloads, no internet needed after install. That matters at 3 AM.
+**J2000** — the epoch the catalog coordinates are fixed to. Stars drift, so
+positions need a reference date.
 
 ---
 
-## Hour-by-hour
+## Representing rotations
 
-### Hours 0–1 — Orient
-All four of you read `PLAN.md` and run the four commands above. Confirm everyone sees the same numbers. Agree the data contract out loud:
+**Quaternion** — four numbers `[w, x, y, z]` with unit length, representing a
+3D rotation. Used throughout instead of Euler angles (which suffer gimbal
+lock) or rotation matrices (nine numbers, six constraints).
 
-> Images are `uint8 (224,224)`. Attitudes are `float64 (4,)` unit quaternions in `[w,x,y,z]`. Always normalized.
+**Double cover** — `q` and `-q` are the *same* rotation. Four numbers for three
+degrees of freedom means every rotation has two valid representations. This is
+why mean squared error is wrong as a loss: it penalises a perfect prediction.
+Every loss in `model.py` uses the absolute cosine.
 
-Interface drift between teammates at hour 14 is the most common way four-person teams lose a hackathon.
+**SO(3)** — the mathematical space of all 3D rotations. Random guessing on
+SO(3) gives a median error of 131°, which is the baseline our failed attitude
+network was measured against.
 
-### Hours 1–2 — Split and launch training
-| Person | Owns |
-|---|---|
-| **A** | Training: run the smoke test, then launch the long attitude run |
-| **B** | Detector: train the U-Net, compare against OpenCV centroiding |
-| **C** | App: Streamlit polish, 3D attitude view, judge sliders |
-| **D** | Benchmark, ablations, Devpost draft, video |
-
-Person A runs this first, always:
-```bash
-python train.py --smoke          # 2 min — must PASS before anything long
-python train.py --task attitude --steps 8000 --batch-size 64
-```
-If the smoke test fails, the bug is in the code, not the hyperparameters. You find it in two minutes instead of four hours.
-
-### Hours 2–6 — Train and build in parallel
-Attitude training on a laptop GPU: roughly 1–2 hours for 8,000 steps. While it runs, B trains the detector (`--task detector --steps 3000`, much faster), C builds the UI, D runs the classical-only benchmark and writes the Devpost draft.
-
-**Expectation management:** full-sky attitude regression is genuinely hard. A single network will likely land in the 1–10° range, not arcseconds. That is not a failure — see *The honest result* below. If you want a headline accuracy number from the learned side, train a **tracking-mode** variant instead: restrict to attitudes within ±10° of a reference (`NoiseConfig` plus a narrowed `random_quaternion`), which is the regime a real star tracker spends most of its life in, and accuracy improves dramatically.
-
-### Hours 6–11 — Integrate
-Wire the trained model into `app.py` (the loader is already there — drop `attitude_net.pt` next to it and the panel populates). Wire the detector into the classical pipeline as a swappable front end so you can benchmark learned-vs-threshold centroiding.
-
-**Post the Devpost draft by 11 PM.** Rough is fine; you can edit later. Missing it disqualifies you entirely.
-
-### Hours 11–15 — Depth
-Run the full benchmark with the model, including `--hybrid`. Add the uncertainty-vs-error correlation plot: bin predictions by predicted σ, plot actual error per bin. If the line is monotone, the model knows when it is wrong, and that is the single most commercially interesting slide you will have.
-
-### Hours 15–19 — Ablations
-This is what separates "we trained a model" from "we did ML". Train short variants (1,500 steps each is enough to rank them):
-
-| Variant | Flag | Expected finding |
-|---|---|---|
-| No domain randomization | pin `noise_level=0.0` | collapses on noisy test data |
-| MSE instead of geodesic | swap the loss | training stalls |
-| From scratch | `--no-pretrained` | slower convergence |
-| Smaller backbone | `backbone="resnet34"` vs 18 | diminishing returns |
-
-Report as a table. Judges notice tables.
-
-### Hours 19–22 — Polish
-3D attitude visualization (Plotly in Streamlit), final benchmark plots, README.
-
-### Hours 22–24 — Ship
-Film the 2-minute video. Attend the ACV/Alan Hunt session on this first — it is mandatory for a complete submission and most teams rush it.
+**Geodesic distance** — the true angular difference between two rotations,
+`2·arccos(|q₁·q₂|)`. Used as the reporting metric. Not used as the training
+loss, because arccos has unbounded gradient near zero error.
 
 ---
 
-## The demo script (90 seconds)
+## The classical pipeline (`classical.py`)
 
-1. **Open on the Live tab, clean conditions.** "This is a simulated star camera. It just determined its orientation to 33 arcseconds, from scratch, knowing nothing beforehand."
-2. **Hand the laptop to the judge.** "Drag that slider." Noise climbs, hot pixels appear, stars drop out. The solve time counter climbs from 30 ms toward 800 ms. Eventually it fails.
-3. **Tracking tab.** Run a sequence, black out ten frames. "We just lost the sensor completely for a full second. The filter coasted on its learned rotation rate and drifted 0.19 degrees."
-4. **Benchmark tab.** "Here is the whole picture, with bootstrap confidence intervals."
+**Centroiding** — finding the sub-pixel centre of each star. Background
+estimate, sigma threshold, connected components, intensity-weighted first
+moment. Accurate to 0.020 px.
 
-Handing over the controls is the strongest move available to you. It cannot be accused of cherry-picking.
+**Star identification** — working out which catalog star each detection is.
 
----
+**Triangle matching** — the method used. A single inter-star angle matches
+about 1,000 catalog pairs, so it is useless alone. Three mutual angles between
+a triple of stars are near-unique. Requires a neighbour index to ask "which
+star sits at angle X from A and angle Y from B".
 
-## The honest result (say this out loud)
+**Pair database** — 77,394 precomputed inter-star angles from 2,833 guide
+stars, sorted for range lookup.
 
-The classical pipeline is **more accurate** than the network where it works — about 0.01°. Do not claim otherwise; a judge who knows the field will catch it, and the honest version is the better story:
+**Wahba's problem** — given matched vector pairs in two frames, find the
+rotation between them. Posed in 1965, solved optimally by SVD (the Kabsch
+algorithm) in about six lines.
 
-> They fail **differently**. The classical solver degrades in *latency* — 30 ms to 800 ms, a 25× climb — and then fails outright at 15% of frames. The network is constant-time and always answers, with calibrated uncertainty. So the right system is a hybrid: the network as a fast always-available prior, the classical solver for precision whenever it can verify itself.
-
-That is an engineering conclusion drawn from your own benchmark. It is worth far more than an inflated accuracy claim.
-
----
-
-## Track positioning
-
-- **Best AI/ML** — three learned components, synthetic data generation, domain randomization, ablations, calibrated uncertainty, benchmarked against a strong classical baseline.
-- **Radial Ventures ($1000)** — the slide says *"hardware, sensors, cameras, real-world measurements, **or simulation**."* Lead with the physics: real catalog, pinhole optics, Pogson's law, Poisson shot noise, full-well saturation. "This is how aerospace teams validate attitude algorithms before launch," which is true.
-- **Most Over Engineered** — two full pipelines, an EKF, and a bootstrap-CI benchmark harness for a problem nobody asked you to solve.
-- **Spirit of the Hackathon** — spacecraft attitude determination at a space-themed hackathon.
+**RANSAC verification** — after an initial solve, reproject the whole catalog
+and refit on everything that matches. A wrong triangle explains only its own
+three stars; a correct one explains nearly every detection in frame. This is
+what delivers the final accuracy.
 
 ---
 
-## Traps already handled for you
+## The renderer (`render.py`)
 
-These are in the code with comments explaining them. Know them, because judges ask.
+**Pinhole camera model** — projects 3D directions onto a 2D sensor plane. Focal
+length derived from the field of view.
 
-1. **Quaternion double cover.** `q` and `-q` are the same rotation. MSE scores a perfect prediction at 1.0. Every loss here uses `|dot|`.
-2. **arccos gradient blowup.** Train on `1 - |dot|` (bounded gradient), report geodesic degrees (interpretable). Using arccos as the loss destabilizes training exactly when the model starts doing well.
-3. **Float32 metric floor.** In float32 the geodesic metric bottoms out at 0.05°, coarser than the classical pipeline's real accuracy — you would be measuring your own rounding error. The metric is computed in float64.
-4. **Pair voting does not work.** One inter-star angle matches ~1,000 catalog pairs, so votes drown in false matches. You need the *triangle* constraint. We tried the naive version first and it returned 94° errors.
-5. **MEKF sign error.** The rate coupling in the error-state transition is `+dt`, not `−dt`. The wrong sign made the filter report a 1877°/s slew rate against a true 3°/s.
-6. **Focal loss for the heatmap.** Stars are 0.03% of pixels. Plain BCE converges to predicting "no star" everywhere at 99.97% accuracy.
-7. **Uniform random rotations.** `random_quaternion` uses Shoemake's method. Random Euler angles cluster at the poles and would bias your training set.
+**Point spread function (PSF)** — a real optic spreads a point source over
+several pixels as a Gaussian. Without this, sub-pixel centroiding is
+impossible.
+
+**Pogson's law** — the magnitude scale. Each step of 1 magnitude is a factor of
+10^0.4 ≈ 2.512 in brightness. Magnitude 6.5 is roughly the naked-eye limit and
+our catalog cutoff.
+
+**Poisson shot noise** — photon arrival is a random process. This noise is
+irreducible; no better sensor removes it.
+
+**Read noise** — Gaussian noise added by the readout electronics.
+
+**Full-well saturation** — pixels stop accumulating once the well fills, which
+is why bright stars render as flat discs rather than tall peaks.
+
+**Domain randomization** — randomising every sensor parameter per image, so the
+network must learn the rotation-invariant geometry rather than memorise one
+camera's characteristics. The mechanism behind synthetic-to-real transfer.
 
 ---
 
-## If you have spare time
+## The learned components (`model.py`, `train.py`)
 
-- **Validate on real astrophotos.** Download a few public night-sky images and run the pipeline. Trained purely on synthetic data, generalizing to real photons, is your sim-to-real proof without a camera. One slide, high impact.
-- **Point-at-a-star mode.** `catalog.lookup("Vega")` already works. Compute the rotation needed to center it and animate the slew.
-- **Learned sensor fusion.** Let a small network gate between the classical and learned estimates instead of the hand-written rule.
+**U-Net** — encoder–decoder with skip connections, outputs at input
+resolution. Used here to produce a star-probability heatmap.
+
+**Heatmap regression** — predicting a soft Gaussian bump at each star instead
+of a hard binary mask. Gives the network a gradient to follow when it is close
+but not exact.
+
+**Focal loss** — down-weights easy examples. Necessary because stars are 0.03%
+of pixels, so plain cross-entropy converges to predicting "no star" everywhere
+at 99.97% accuracy.
+
+**Recall / precision** — recall is the fraction of real stars found; precision
+is the fraction of detections that were real. In this pipeline recall is the
+expensive quantity: a false detection is rejected cheaply by triangle
+matching, but a missed star is gone.
+
+**Heteroscedastic uncertainty** — the model predicting its own error variance,
+trained jointly with the main task. Feeds the Kalman filter as a measurement
+covariance.
+
+**Overfit smoke test** — before any long training run, confirm the loop can
+drive loss to zero on ~24 fixed samples. If it cannot, the bug is in the code,
+not the hyperparameters.
+
+---
+
+## The filter (`tracking.py`)
+
+**EKF** — Extended Kalman Filter. Recursive state estimation for nonlinear
+systems.
+
+**Multiplicative EKF (MEKF)** — the spacecraft-standard variant. A quaternion
+has four components but only three degrees of freedom, so a filter running on
+the raw components has a singular covariance. The MEKF keeps the full attitude
+as a reference quaternion and runs the filter on a three-parameter small-angle
+*error* about it.
+
+**Error state** — the small-angle deviation being estimated, rather than the
+attitude itself.
+
+**Innovation** — the difference between a measurement and the filter's
+prediction of it.
+
+**Joseph form** — a covariance update that stays positive-definite under
+floating point, where the textbook `(I − KH)P` form can go indefinite and
+diverge.
+
+**Coasting** — continuing to propagate an estimate with no measurements. Ours
+survives one full second of total sensor loss at 0.19° of drift.
+
+---
+
+## Evaluation (`benchmark.py`, `eval_detector.py`)
+
+**Bootstrap confidence interval** — resampling to estimate uncertainty on the
+median. Used because the error distribution is heavily skewed: a handful of
+total failures sit beside many sub-arcminute solves, so mean ± standard
+deviation would mislead.
+
+**Degradation sweep** — a single 0-to-1 dial interpolating every sensor
+imperfection from clean to severe, so accuracy, robustness and latency can be
+plotted against one axis.
